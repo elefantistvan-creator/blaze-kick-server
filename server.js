@@ -8,13 +8,29 @@ const server = http.createServer((req, res) => {
 });
  
 const wss = new WebSocket.Server({ server });
- 
 const rooms = {};
+ 
+// Pálya arányok (0-1 között, mint a kliens)
+var WL = 0.08;  // fal vastagság arány
+var TW = 0.04;  // felső fal
+var BW = 0.04;  // alsó fal
+var GY = 0.32;  // kapu Y kezdete
+var GH = 0.36;  // kapu magasság
+var BR = 0.028; // labda sugár
+var PR = 0.10;  // kapus fél magasság
+var MR = 0.065; // mezőnyjátékos fél magasság
+var PW = 0.02;  // ütő szélessége
  
 function createBall() {
   var dir = Math.random() > 0.5 ? 1 : -1;
-  return { x: 0.5, y: 0.5, vx: 0.004 * dir, vy: (Math.random() - 0.5) * 0.003 };
+  return {
+    x: 0.5, y: 0.5,
+    vx: 0.005 * dir,
+    vy: (Math.random() - 0.5) * 0.004
+  };
 }
+ 
+function clamp(v, min, max) { return Math.max(min, Math.min(max, v)); }
  
 function gameLoop(room) {
   var b = room.ball;
@@ -24,57 +40,58 @@ function gameLoop(room) {
   b.x += b.vx;
   b.y += b.vy;
  
-  // Fal ütközés fel/le
-  if (b.y < 0.04) { b.y = 0.04; b.vy = Math.abs(b.vy); }
-  if (b.y > 0.96) { b.y = 0.96; b.vy = -Math.abs(b.vy); }
+  // Fel/le fal
+  if (b.y - BR < TW)   { b.y = TW + BR;   b.vy =  Math.abs(b.vy); }
+  if (b.y + BR > 1-BW) { b.y = 1-BW - BR; b.vy = -Math.abs(b.vy); }
  
-  var BR = 0.028; // labda sugár (arányos)
-  var PW = 0.018; // pálcika szélesség
-  var PR = 0.12;  // kapus magasság fele
-  var MR = 0.07;  // mezőnyjátékos magasság fele
- 
-  // Host kapus ütközés (bal oldal)
-  if (b.x - BR < 0.04 + PW && b.x > 0.02 &&
+  // Host kapus (bal oldal) - x ~0.08
+  var hpx = WL + PW;
+  if (b.x - BR < hpx && b.x > WL &&
       b.y > s.h_py - PR && b.y < s.h_py + PR) {
     b.vx = Math.abs(b.vx) * 1.05;
-    b.x = 0.04 + PW + BR;
-  }
-  // Host mezőnyjátékos
-  if (b.x - BR < 0.42 + PW && b.x > 0.38 &&
-      b.y > s.h_my - MR && b.y < s.h_my + MR) {
-    b.vx = Math.abs(b.vx) * 1.05;
-    b.x = 0.42 + PW + BR;
+    b.x = hpx + BR;
   }
  
-  // Guest kapus ütközés (jobb oldal)
-  if (b.x + BR > 0.96 - PW && b.x < 0.98 &&
+  // Host mezőnyjátékos - x ~0.42
+  var hmx = 0.42 + PW;
+  if (b.x - BR < hmx && b.x > 0.38 &&
+      b.y > s.h_my - MR && b.y < s.h_my + MR) {
+    b.vx = Math.abs(b.vx) * 1.05;
+    b.x = hmx + BR;
+  }
+ 
+  // Guest kapus (jobb oldal) - x ~0.92
+  var gpx = 1 - WL - PW;
+  if (b.x + BR > gpx && b.x < 1-WL &&
       b.y > s.g_py - PR && b.y < s.g_py + PR) {
     b.vx = -Math.abs(b.vx) * 1.05;
-    b.x = 0.96 - PW - BR;
+    b.x = gpx - BR;
   }
-  // Guest mezőnyjátékos
-  if (b.x + BR > 0.58 - PW && b.x < 0.62 &&
+ 
+  // Guest mezőnyjátékos - x ~0.58
+  var gmx = 0.58 - PW;
+  if (b.x + BR > gmx && b.x < 0.62 &&
       b.y > s.g_my - MR && b.y < s.g_my + MR) {
     b.vx = -Math.abs(b.vx) * 1.05;
-    b.x = 0.58 - PW - BR;
+    b.x = gmx - BR;
   }
  
   // Sebesség limit
-  var maxV = 0.018;
-  if (Math.abs(b.vx) > maxV) b.vx = b.vx > 0 ? maxV : -maxV;
-  if (Math.abs(b.vy) > maxV) b.vy = b.vy > 0 ? maxV : -maxV;
+  var maxV = 0.02;
+  b.vx = clamp(b.vx, -maxV, maxV);
+  b.vy = clamp(b.vy, -maxV, maxV);
  
-  // Gól
-  var GY = 0.32, GH = 0.36;
-  if (b.x < 0.02 && b.y > GY && b.y < GY + GH) {
+  // Gól - bal kapu (host kapott)
+  if (b.x < WL && b.y > GY && b.y < GY + GH) {
     s.sc2++;
     room.ball = createBall();
-    room.ball.vx = Math.abs(room.ball.vx); // guest felé indul
+    room.ball.vx = Math.abs(room.ball.vx);
   }
-  if (b.x > 0.98 && b.y > GY && b.y < GY + GH) {
+  // Gól - jobb kapu (guest kapott)
+  if (b.x > 1-WL && b.y > GY && b.y < GY + GH) {
     s.sc1++;
     room.ball = createBall();
-    room.ball.vx = -Math.abs(room.ball.vx); // host felé indul
+    room.ball.vx = -Math.abs(room.ball.vx);
   }
  
   // Meccs vége
@@ -85,11 +102,10 @@ function gameLoop(room) {
     return;
   }
  
-  // Állapot küldés mindkét félnek
+  // Állapot küldés
   sendToRoom(room, {
     type: 'state',
     bx: room.ball.x, by: room.ball.y,
-    bvx: room.ball.vx, bvy: room.ball.vy,
     h_py: s.h_py, h_my: s.h_my,
     g_py: s.g_py, g_my: s.g_my,
     sc1: s.sc1, sc2: s.sc2
@@ -132,10 +148,8 @@ wss.on('connection', (ws) => {
         ws.code = msg.code;
         ws.role = 'guest';
         room.guest = ws;
-        // Játék indul
         room.host.send(JSON.stringify({ type: 'start', role: 'host' }));
         ws.send(JSON.stringify({ type: 'start', role: 'guest' }));
-        // Game loop 30fps
         room.loop = setInterval(() => gameLoop(room), 33);
       }
  
@@ -143,15 +157,15 @@ wss.on('connection', (ws) => {
         var room = rooms[ws.code];
         if (!room) return;
         if (ws.role === 'host') {
-          room.state.h_py = Math.max(0.1, Math.min(0.9, msg.py));
-          room.state.h_my = Math.max(0.1, Math.min(0.9, msg.my));
+          room.state.h_py = clamp(msg.py, 0.1, 0.9);
+          room.state.h_my = clamp(msg.my, 0.1, 0.9);
         } else {
-          room.state.g_py = Math.max(0.1, Math.min(0.9, msg.py));
-          room.state.g_my = Math.max(0.1, Math.min(0.9, msg.my));
+          room.state.g_py = clamp(msg.py, 0.1, 0.9);
+          room.state.g_my = clamp(msg.my, 0.1, 0.9);
         }
       }
  
-    } catch(e) {}
+    } catch(e) { console.error(e); }
   });
  
   ws.on('close', () => {
@@ -170,3 +184,8 @@ wss.on('connection', (ws) => {
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => console.log('Blaze Kick szerver: ' + PORT));
  
+
+
+
+
+
